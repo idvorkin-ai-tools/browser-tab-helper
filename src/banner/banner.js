@@ -18,9 +18,9 @@
   // A constructed sheet, so a page's strict style-src CSP cannot strip the card's styling.
   const sheet = new CSSStyleSheet();
   sheet.replaceSync(`
-    :host { font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color-scheme: light dark; }
     .backdrop { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-      background: rgba(0, 0, 0, 0.55); }
+      background: rgba(0, 0, 0, 0.55); color-scheme: light dark;
+      font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .card { position: relative; box-sizing: border-box; width: min(460px, calc(100vw - 32px)); padding: 22px 24px;
       border-radius: 14px; background: #fff; color: #1c1c1e; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45); }
     h1 { margin: 0 28px 4px 0; font-size: 18px; font-weight: 600; }
@@ -63,7 +63,11 @@
 
   const run = (action) => {
     dismiss();
-    chrome.runtime.sendMessage({ type: 'card-action', action: action.id }).catch(() => {});
+    try {
+      chrome.runtime.sendMessage({ type: 'card-action', action: action.id }).catch(() => {});
+    } catch {
+      // The extension reloaded while this card sat up, which leaves chrome.runtime behind. Dismissing is all that is left.
+    }
   };
 
   const backdrop = make('div', 'backdrop');
@@ -87,7 +91,10 @@
     button.append(make('span', 'label', action.label));
     if (action.shortcut) button.append(make('span', 'shortcut', action.shortcut));
     button.append(make('span', 'letter', action.keys.join(' ')));
-    button.addEventListener('click', () => run(action));
+    // The root is open, so the page can reach these. Only a real press may close tabs.
+    button.addEventListener('click', (event) => {
+      if (event.isTrusted) run(action);
+    });
     actions.append(button);
   }
 
@@ -101,6 +108,7 @@
 
   const primary = card.actions.find((action) => action.primary);
   keys.addEventListener('keydown', (event) => {
+    if (!event.isTrusted) return;
     if (event.metaKey || event.ctrlKey || event.altKey) return; // Cmd+W and friends stay the browser's.
     const key = event.key.toLowerCase();
     let handled = true;
