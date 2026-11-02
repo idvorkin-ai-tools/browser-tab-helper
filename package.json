@@ -1,0 +1,17 @@
+{
+  "name": "browser-tab-helper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Chrome extension for duplicate tabs, a full tab list, tab layouts, and a native host for local tools.",
+  "type": "module",
+  "bin": {
+    "host": "tools/host.js"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "test:e2e": "node test/e2e/run.js",
+    "host": "node tools/host.js",
+    "bridge": "node tools/bridge.js",
+    "ask": "node tools/ask.js"
+  }
+}
