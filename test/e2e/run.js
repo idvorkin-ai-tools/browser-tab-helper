@@ -120,14 +120,14 @@ export class Browser {
     });
   }
 
-  send(method, params = {}, sessionId) {
+  send(method, params = {}, sessionId, limitMs = 15_000) {
     const id = this.nextId++;
     return new Promise((done, fail) => {
       // A target that goes away mid-call never answers, so every call has a limit.
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        fail(new Error(`${method}: no answer in 15 s`));
-      }, 15_000);
+        fail(new Error(`${method}: no answer in ${limitMs / 1000} s`));
+      }, limitMs);
       this.pending.set(id, {
         done: (value) => { clearTimeout(timer); done(value); },
         fail: (error) => { clearTimeout(timer); fail(error); },
@@ -137,9 +137,9 @@ export class Browser {
     });
   }
 
-  async attach(targetId) {
-    const { sessionId } = await this.send('Target.attachToTarget', { targetId, flatten: true });
-    await this.send('Runtime.enable', {}, sessionId);
+  async attach(targetId, limitMs) {
+    const { sessionId } = await this.send('Target.attachToTarget', { targetId, flatten: true }, undefined, limitMs);
+    await this.send('Runtime.enable', {}, sessionId, limitMs);
     return sessionId;
   }
 
@@ -152,10 +152,13 @@ export class Browser {
   }
 
   async worker(id) {
-    const target = await until('the service worker', () => [...this.targets.values()].find(
-      (info) => info.type === 'service_worker' && (!id || info.url.includes(id)),
-    ));
-    return { id: new URL(target.url).hostname, session: await this.attach(target.targetId) };
+    // Chromium can stop and restart a worker around install, and a stopped instance never answers, so each attempt
+    // gets a short limit and the next one looks up the target again.
+    return until('the service worker', async () => {
+      const target = [...this.targets.values()].find((info) => info.type === 'service_worker' && (!id || info.url.includes(id)));
+      if (!target) return null;
+      return { id: new URL(target.url).hostname, session: await this.attach(target.targetId, 3000) };
+    }, 30_000);
   }
 
   /** A session on the page in tab `url`, by URL prefix. */
@@ -971,18 +974,27 @@ async function main() {
 
     const manifestPath = join(copy, 'manifest.json');
 
+    // Attached once, up front: a fresh attach to a background page that has sat idle for 35 s can go unanswered.
+    let listSession = null;
+
     await check('R9 switched off, a manifest edit does not reload', async () => {
+      listSession = await second.page(listUrl);
       writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace('"version": "0.1.0"', '"version": "0.1.1"'));
       await sleep(35_000);
       ok(listIsOpen(), 'a reload would have closed the list page');
     });
 
     await check('R9 switched on, a manifest edit fires the reload within about 30 s', async () => {
-      const page = await second.page(listUrl);
-      await second.evalIn(page, "chrome.storage.local.set({settings: {autoReload: true}})");
+      await second.evalIn(listSession, "chrome.storage.local.set({settings: {autoReload: true}})");
       const started = Date.now();
       writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace('"version": "0.1.1"', '"version": "0.1.2"'));
-      await until('the reload closes the list page', () => !listIsOpen(), 40_000);
+      await until('the reload closes the list page', () => !listIsOpen(), 40_000).catch(async (error) => {
+        const state = await second.evalIn(listSession, `Promise.all([chrome.storage.local.get(), chrome.alarms.getAll()]).then(([s, a]) => JSON.stringify({
+          settings: s.settings, hash: s.fileHash?.slice(0, 8), reopen: s.reopenList, alarmInMs: a[0] && a[0].scheduledTime - Date.now(), manifest: chrome.runtime.getManifest().version,
+        }))`).catch((inner) => `unreadable: ${inner.message}`);
+        const workers = [...second.targets.values()].filter((info) => info.type === 'service_worker').map((info) => info.url.split('/')[2]);
+        throw new Error(`${error.message}; state ${state}; workers ${workers}; ${copyId}`);
+      });
       const seconds = (Date.now() - started) / 1000;
       console.log(`      reload fired after ${seconds.toFixed(1)} s`);
       ok(seconds < 35, `took ${seconds} s`);
