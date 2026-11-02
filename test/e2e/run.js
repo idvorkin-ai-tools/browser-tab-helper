@@ -11,6 +11,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBridge } from '../../tools/bridge.js';
+import { isEntryPoint } from '../../tools/entry.js';
 import { extensionIdForPath, installHost } from '../../tools/host.js';
 
 const CHECKOUT = realpathSync(fileURLToPath(new URL('../../', import.meta.url))).replace(/\/$/, '');
@@ -183,7 +184,12 @@ function startPages() {
     let body = `<!doctype html><title>Page ${pathname}</title><p id=text>Some selectable text on ${pathname}</p>`;
     if (pathname.startsWith('/csp')) headers['content-security-policy'] = "default-src 'none'; style-src 'none'; script-src 'none'";
     if (pathname.startsWith('/login')) {
-      body = '<!doctype html><title>Login</title><input id=pw type=password value=hunter2><input id=name value="plain words"><p id=text>public text</p>';
+      body = `<!doctype html><title>Login</title><input id=pw type=password value=hunter2><input id=name value="plain words"><p id=text>public text</p>
+        <input id=auto autocomplete="current-password" value="autopw"><input id=css style="-webkit-text-security: disc" value="csspw">`;
+    }
+    // Hangs for good once loaded, as a stuck page does: script injection and CDP input then never answer.
+    if (pathname.startsWith('/hang')) {
+      body = '<!doctype html><title>Hung</title><input id=f autofocus><script>setTimeout(() => { for (;;); }, 300)</script>';
     }
     if (pathname.startsWith('/inner')) {
       body = '<!doctype html><title>Inner</title><button onclick="parent.postMessage(\'inner-click\',\'*\');document.title=\'clicked\'">Inner button</button>';
@@ -436,6 +442,48 @@ async function main() {
     await closeAllBut(stay);
   });
 
+  await check('R2 a page cannot press the card\'s buttons or keys; a real click can', async () => {
+    const { first, second, session } = await openPair('/forged');
+    await browser.send('Page.bringToFront', {}, session);
+    await browser.evalIn(session, `(() => {
+      const root = document.getElementById('browser-tab-helper-card').shadowRoot;
+      root.querySelector('[data-action="jump"]').click();
+      root.querySelector('input').dispatchEvent(new KeyboardEvent('keydown', {key: 'j', bubbles: true, composed: true}));
+    })()`);
+    await sleep(400);
+    ok((await tabIds()).includes(second), 'the forged press closed the tab');
+    ok(await cardIn(session), 'the forged press took the card down');
+    const box = await browser.evalIn(session, `(() => {
+      const r = document.getElementById('browser-tab-helper-card').shadowRoot.querySelector('[data-action="jump"]').getBoundingClientRect();
+      return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+    })()`);
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...box }, session);
+    await browser.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...box }, session);
+    await browser.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...box }, session).catch(() => {});
+    await until('the real click jumps', async () => !(await tabIds()).includes(second));
+    ok((await tabIds()).includes(first), 'the original stayed');
+    await closeAllBut(stay);
+  });
+
+  await check('R2 the card has its own font, and with no older copy no Close the other', async () => {
+    const { first, session } = await openPair('/looks');
+    const font = await browser.evalIn(session, "getComputedStyle(document.getElementById('browser-tab-helper-card').shadowRoot.querySelector('.card')).fontFamily");
+    ok(/apple-system|BlinkMacSystemFont/.test(font), `the card fell back to ${font}`);
+    if (process.env.E2E_SHOTS) {
+      await browser.send('Page.bringToFront', {}, session);
+      const { data } = await browser.send('Page.captureScreenshot', { format: 'png' }, session);
+      writeFileSync(join(process.env.E2E_SHOTS, 'card.png'), Buffer.from(data, 'base64'));
+    }
+    // Reloading the older tab lands it with only a newer copy open.
+    await inWorker(`await chrome.tabs.reload(${first})`);
+    await sleep(300);
+    const olderTarget = [...browser.targets.values()].find((info) => info.type === 'page' && info.url === `${base}/looks`);
+    const older = await browser.attach(olderTarget.targetId);
+    const card = await until('the card on the older tab', () => cardIn(older));
+    equal(card.actions, ['jump', 'keep']);
+    await closeAllBut(stay);
+  });
+
   await check('R1 a fragment-only difference gets no card, in a real browser', async () => {
     const first = await open('/frag#one');
     await until('load', () => inWorker(`return (await chrome.tabs.get(${first})).status === 'complete'`));
@@ -583,8 +631,17 @@ async function main() {
     ok((await rows()).length > 2, 'click again clears');
     await inList(`document.querySelector('#strip .chip[data-chip-window="${secondWindow}"]').dispatchEvent(new MouseEvent('dblclick', {bubbles: true}))`);
     await until('focused', () => inWorker(`return (await chrome.windows.get(${secondWindow})).focused`));
+    // The page redraws about 80 ms after the last event. If it never shows both rows, it has gone stale for good.
+    await until('both rows drawn in their window', async () => (await inList(`return document.querySelectorAll('#sections .row[data-window="${secondWindow}"]').length`)) === 2);
     await inList(`document.querySelector('#strip .chip[data-chip-window="${secondWindow}"]').dispatchEvent(new MouseEvent('mouseover', {bubbles: true}))`);
-    ok(await inList("return document.querySelectorAll('#sections .row.highlight').length === 2"), 'hover highlights its rows');
+    const lit = await inList(`return JSON.stringify({
+      lit: [...document.querySelectorAll('#sections .row.highlight')].map((row) => row.querySelector('.row-title').textContent),
+      inWindow: [...document.querySelectorAll('#sections .row[data-window="${secondWindow}"]')].length,
+      all: document.querySelectorAll('#sections .row').length,
+      real: (await chrome.tabs.query({windowId: ${secondWindow}})).map((t) => t.url.split('/').pop()),
+    })`);
+    equal(JSON.parse(lit).lit.length, JSON.parse(lit).real.length, `hover highlights its rows: ${lit}`);
+    equal(JSON.parse(lit).real.length, 2, `the rebuilt window: ${lit}`);
     await inList("document.getElementById('strip').dispatchEvent(new MouseEvent('mouseleave'))");
     await browser.send('Page.bringToFront', {}, list);
   });
@@ -644,6 +701,74 @@ async function main() {
     });
     await inList("const all = document.querySelectorAll('.toast button'); all[all.length - 1].click()");
     await until('undone', async () => (await inWorker(`return (await chrome.tabs.get(${dragged})).windowId`)) === secondWindow);
+  });
+
+  const newestUndo = () => inList("const all = document.querySelectorAll('.toast button'); all[all.length - 1].click()");
+  const failedToasts = () => inList("return [...document.querySelectorAll('.toast span')].map((n) => n.textContent).filter((text) => /failed/i.test(text))");
+  const openIn = (windowId, paths) => inWorker(`
+    const ids = [];
+    for (const path of ${JSON.stringify(paths)}) ids.push((await chrome.tabs.create({windowId: ${windowId}, url: ${JSON.stringify(base)} + path, active: false})).id);
+    return ids;`);
+  const rowsDrawn = (ids) => until('the rows', () => inList(`return ${JSON.stringify(ids)}.every((id) => document.querySelector('#sections .row[data-tab="' + id + '"]'))`));
+  const selectRows = (ids) => inList(`
+    for (const id of ${JSON.stringify(ids)}) {
+      document.querySelector('#sections .row[data-tab="' + id + '"]').dispatchEvent(new MouseEvent('click', {bubbles: true, metaKey: true}));
+    }`);
+
+  await check('R4 several rows dragged rightward keep their order, through real tabs.move, and undo', async () => {
+    const paths = ['/m-a', '/m-b', '/m-c', '/m-d', '/m-e'];
+    const [ma, mb, , md] = await openIn(homeWindow, paths);
+    await rowsDrawn([ma, mb, md]);
+    const strip = async () => (await urlsInOrder()).filter((url) => url.startsWith('/m-'));
+    // A tab still loading has an empty url, so this waits for them all rather than checking once.
+    await until('all five open in order', async () => JSON.stringify(await strip()) === JSON.stringify(paths));
+    await selectRows([ma, mb]);
+    await inList(`
+      const row = document.querySelector('#sections .row[data-tab="${ma}"]');
+      const target = document.querySelector('#sections .row[data-tab="${md}"]');
+      const data = new DataTransfer();
+      row.dispatchEvent(new DragEvent('dragstart', {bubbles: true, dataTransfer: data}));
+      const clientY = target.getBoundingClientRect().top + 2;
+      target.dispatchEvent(new DragEvent('dragover', {bubbles: true, cancelable: true, dataTransfer: data, clientY}));
+      target.dispatchEvent(new DragEvent('drop', {bubbles: true, cancelable: true, dataTransfer: data, clientY}));
+      row.dispatchEvent(new DragEvent('dragend', {bubbles: true}));`);
+    await sleep(500);
+    equal(await strip(), ['/m-c', '/m-a', '/m-b', '/m-d', '/m-e'], 'dragged A,B to before D');
+    await newestUndo();
+    await until('undone', async () => JSON.stringify(await strip()) === JSON.stringify(paths));
+    await inWorker('for (const t of await chrome.tabs.query({})) if (t.url.includes("/m-")) await chrome.tabs.remove(t.id)');
+  });
+
+  await check('R4 undoing a move brings back the tab group it emptied', async () => {
+    const [solo] = await openIn(secondWindow, ['/g-solo']);
+    await inWorker(`const g = await chrome.tabs.group({tabIds: [${solo}], createProperties: {windowId: ${secondWindow}}}); await chrome.tabGroups.update(g, {title: 'Emptied', color: 'red', collapsed: false});`);
+    await rowsDrawn([solo]);
+    await until('the page knows the group', () => inList(`return [...document.querySelectorAll('#sections .row[data-tab="${solo}"] .pill')].some((n) => n.textContent === 'Emptied')`));
+    await inList(`[...document.querySelectorAll('#sections .row[data-tab="${solo}"] button')].find((b) => b.textContent === 'Move here').click()`);
+    await until('the group is gone', async () => (await inWorker("return (await chrome.tabGroups.query({title: 'Emptied'})).length")) === 0);
+    await newestUndo();
+    const group = await until('the group is back', async () => (await inWorker("return (await chrome.tabGroups.query({title: 'Emptied'}))[0]")) ?? null);
+    equal([group.color, group.windowId], ['red', secondWindow]);
+    equal(await inWorker(`return (await chrome.tabs.get(${solo})).groupId`), group.id);
+    equal(await failedToasts(), []);
+    await inWorker(`await chrome.tabs.remove(${solo})`);
+  });
+
+  await check('R4 a partly failed bulk close still offers undo for what did close', async () => {
+    const [pa, pb, pc] = await openIn(homeWindow, ['/p-a', '/p-b', '/p-c']);
+    await rowsDrawn([pa, pb, pc]);
+    await until('loaded', () => inWorker(`return (await Promise.all([${pa}, ${pb}, ${pc}].map((id) => chrome.tabs.get(id)))).every((t) => t.status === 'complete')`));
+    await selectRows([pa, pb, pc]);
+    // The middle tab goes behind the page's back, before it has redrawn.
+    await inList(`
+      await chrome.tabs.remove(${pb});
+      [...document.querySelectorAll('#selection-bar button')].find((b) => b.textContent === 'Close').click();`);
+    const left = () => inWorker("return (await chrome.tabs.query({})).filter((t) => t.url.includes('/p-')).map((t) => t.url.split('/').pop())");
+    await until('the rest still close', async () => (await left()).length === 0);
+    await until('a toast offers undo', () => inList("return [...document.querySelectorAll('.toast')].some((n) => /Closed 2 tabs/.test(n.textContent) && n.querySelector('button'))"));
+    await newestUndo();
+    await until('both come back', async () => JSON.stringify((await left()).sort()) === JSON.stringify(['p-a', 'p-c']));
+    await inWorker('for (const t of await chrome.tabs.query({})) if (t.url.includes("/p-")) await chrome.tabs.remove(t.id)');
   });
 
   await check('R4 lenses: By kind, Duplicates with real URLs, Close N extras with undo, Close N duplicates', async () => {
@@ -761,6 +886,26 @@ async function main() {
     await clickText('#lenses button', 'By window');
   });
 
+  await check('R6 undo of Open section: new tabs close and moved tabs go back', async () => {
+    const after = await inWorker("const t = (await chrome.tabs.query({})).find((x) => x.url.includes('/l-after')); return t.id");
+    await newestUndo();
+    await until('the new tabs close', async () => (await inWorker("return (await chrome.tabs.query({})).filter((t) => /s-fresh|s-bare/.test(t.pendingUrl || t.url)).length")) === 0);
+    await until('the moved tab goes home', async () => (await inWorker(`return (await chrome.tabs.get(${after})).windowId`)) !== homeWindow);
+    equal(await failedToasts(), []);
+  });
+
+  await check('R6 undo of Open section when every tab was new', async () => {
+    await inList(`await navigator.clipboard.writeText(${JSON.stringify(`All new\n${base}/n-one\n${base}/n-two`)})`);
+    await clickText('#open-section', 'Open section');
+    const newOnes = () => inWorker("return (await chrome.tabs.query({})).filter((t) => /n-one|n-two/.test(t.pendingUrl || t.url)).length");
+    await until('opened', async () => (await newOnes()) === 2 && (await inWorker("return (await chrome.tabGroups.query({title: 'All new'})).length")) === 1);
+    await until('its toast', () => inList("return [...document.querySelectorAll('.toast')].some((n) => n.textContent.startsWith('Opened All new'))"));
+    await newestUndo();
+    await until('closed', async () => (await newOnes()) === 0);
+    await sleep(200);
+    equal(await failedToasts(), []);
+  });
+
   // ---- R7 ----
 
   await check('R7 Chromium starts the host from the installed manifest, and its socket is 0600', async () => {
@@ -790,6 +935,15 @@ async function main() {
     equal(JSON.parse((await askSocket(sock)).line).selection, null);
     await browser.evalIn(session, "(() => { const n = document.getElementById('name'); n.focus(); n.select(); })()");
     equal(JSON.parse((await askSocket(sock)).line).selection, 'plain words');
+  });
+
+  await check('R7 fields masked another way are not read either: autocomplete, and CSS', async () => {
+    const session = await browser.page(`${base}/login`);
+    await browser.send('Page.bringToFront', {}, session);
+    for (const field of ['auto', 'css']) {
+      await browser.evalIn(session, `(() => { const f = document.getElementById('${field}'); f.focus(); f.select(); })()`);
+      equal(JSON.parse((await askSocket(sock)).line).selection, null, field);
+    }
   });
 
   await check('R7 a page that refuses scripts answers with no selection', async () => {
@@ -905,12 +1059,70 @@ async function main() {
     await until('a card event', () => existsSync(logPath) && readFileSync(logPath, 'utf8').includes('"event":"card"'));
   });
 
+  await check('R8 a click on a background tab lands, slowly', async () => {
+    const tab = (await ask({ cmd: 'open', url: `${base}/controls?background` })).id;
+    await until('load', async () => (await inWorker(`return (await chrome.tabs.get(${tab})).status`)) === 'complete');
+    await inWorker(`await chrome.tabs.update(${controlsTab}, {active: true})`);
+    equal(await inWorker(`return (await chrome.tabs.get(${tab})).active`), false);
+    const started = Date.now();
+    equal((await ask({ cmd: 'click', tab, target: 'Press me' })).via, 'debugger');
+    console.log(`      background click took ${((Date.now() - started) / 1000).toFixed(1)} s`);
+    await until('it landed', async () => (await ask({ cmd: 'read', tab })).controls.some((control) => control.label === 'Pressed'));
+    await extensionDetached(tab);
+    await ask({ cmd: 'close', tab });
+  });
+
+  await check('R8 a command that never finishes times out, lets go of the debugger, and frees the bridge', async () => {
+    await inWorker(`await chrome.storage.local.set({settings: {bridgeEnabled: true, bridgePort: ${bridgePort}, bridgeCommandTimeoutMs: 2000}})`);
+    const hung = (await ask({ cmd: 'open', url: `${base}/hang` })).id;
+    await sleep(1200);
+    const limited = (command) => Promise.race([
+      ask(command).then(() => 'answered', (error) => error.message),
+      sleep(12_000).then(() => 'STILL WAITING after 12 s'),
+    ]);
+    const typed = await limited({ cmd: 'type', tab: hung, text: 'x' });
+    ok(/did not finish/.test(typed), `type: ${typed}`);
+    await extensionDetached(hung);
+    const read = await limited({ cmd: 'read', tab: hung });
+    ok(/did not finish/.test(read), `read: ${read}`);
+    equal((await ask({ cmd: 'diag' })).id, sw.id, 'the bridge still answers');
+    await inWorker(`await chrome.tabs.remove(${hung})`);
+    await inWorker(`await chrome.storage.local.set({settings: {bridgeEnabled: true, bridgePort: ${bridgePort}}})`);
+  });
+
   await check('R8 the worker carries on when the server dies', async () => {
     await bridge.close();
     await sleep(200);
     equal(await inWorker('return typeof chrome.runtime.id'), 'string');
     const tab = await open('/after-bridge');
     await until('still answering', () => inWorker(`return (await chrome.tabs.get(${tab})).status === 'complete'`));
+  });
+
+  await check('R8 switching off drops the held poll, and no command runs after it', async () => {
+    const off = createBridge({ logPath, answerTimeoutMs: 2500 });
+    const port = await off.listen(0);
+    const send = async (command) => {
+      const response = await fetch(`http://127.0.0.1:${port}/ask`, { method: 'POST', body: JSON.stringify(command) });
+      return { status: response.status, ...(await response.json()) };
+    };
+    const setBridge = (on) => inWorker(`await chrome.storage.local.set({settings: {bridgeEnabled: ${on}, bridgePort: ${port}}})`);
+    try {
+      await setBridge(false);
+      await sleep(100);
+      await setBridge(true);
+      equal((await send({ cmd: 'diag' })).result?.id, sw.id, 'on: a command runs');
+      await sleep(300); // The worker is holding its next poll now.
+      await setBridge(false);
+      await sleep(300);
+      const refused = await send({ cmd: 'open', url: `${base}/must-not-open` });
+      equal(refused.status, 504, `answered: ${JSON.stringify(refused)}`);
+      equal(await inWorker("return (await chrome.tabs.query({})).filter((t) => (t.pendingUrl || t.url).includes('must-not-open')).length"), 0, 'it ran while off');
+      await setBridge(true);
+      equal((await send({ cmd: 'diag' })).result?.id, sw.id, 'on again at once: the old poll left nothing behind');
+    } finally {
+      await inWorker("await chrome.storage.local.remove('settings')");
+      await off.close();
+    }
   });
 
   await browser.close();
@@ -976,9 +1188,11 @@ async function main() {
 
     // Attached once, up front: a fresh attach to a background page that has sat idle for 35 s can go unanswered.
     let listSession = null;
+    let cardSession = null;
 
     await check('R9 switched off, a manifest edit does not reload', async () => {
       listSession = await second.page(listUrl);
+      cardSession = await second.page(`${base2}/edited?utm_id=1`);
       writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace('"version": "0.1.0"', '"version": "0.1.1"'));
       await sleep(35_000);
       ok(listIsOpen(), 'a reload would have closed the list page');
@@ -999,6 +1213,16 @@ async function main() {
       console.log(`      reload fired after ${seconds.toFixed(1)} s`);
       ok(seconds < 35, `took ${seconds} s`);
     });
+
+    await check('R2 a card left over from before a reload dismisses cleanly', async () => {
+      // The reload above has just orphaned this card's script, so its message cannot be sent.
+      await second.send('Page.bringToFront', {}, cardSession);
+      await second.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'j', text: 'j' }, cardSession);
+      await second.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'j' }, cardSession);
+      await until('the card goes', () => second.evalIn(cardSession, "!document.getElementById('browser-tab-helper-card')"));
+      await sleep(300);
+      equal(second.errors.filter((text) => /context invalidated|sendMessage|runtime/i.test(text)), [], 'exceptions');
+    });
   } finally {
     await second.close();
     server2.close();
@@ -1011,7 +1235,7 @@ async function main() {
   process.exit(failed.length ? 1 : 0);
 }
 
-if (import.meta.main) {
+if (isEntryPoint(import.meta.url)) {
   main().catch((error) => {
     console.error(error);
     process.exit(1);
