@@ -7,7 +7,8 @@ import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createBridge, DEFAULT_PORT } from '../tools/bridge.js';
+import { createBridge, DEFAULT_PORT, defaultLogPath } from '../tools/bridge.js';
+import { DEFAULT_SETTINGS } from '../src/lib/settings.js';
 import { parseArgs } from '../tools/ask.js';
 import { findControl, keyEvents, numberControls } from '../src/lib/controls.js';
 import { readSelection } from '../src/lib/page-scripts.js';
@@ -299,4 +300,67 @@ test('selection: the injected function stands alone', () => {
   assert.doesNotMatch(source, /\b(import|require)\b/);
   const rebuilt = new Function(`return (${source})`)();
   assert.equal(rebuilt(fakeDoc({ selected: 'ok' })), 'ok');
+});
+
+const masked = (extra) => ({ tagName: 'INPUT', type: 'text', value: 'secret', selectionStart: 0, selectionEnd: 6, ...extra });
+const styledDoc = (active, security, selected = 'page text') => ({
+  ...fakeDoc({ active, selected }),
+  defaultView: { getComputedStyle: () => ({ getPropertyValue: (name) => (name === '-webkit-text-security' ? security : '') }) },
+});
+
+test('selection: a field marked as a password by autocomplete is never read', () => {
+  for (const autocomplete of ['current-password', 'new-password', 'section-login current-password', 'CURRENT-PASSWORD']) {
+    const active = masked({ getAttribute: (name) => (name === 'autocomplete' ? autocomplete : null) });
+    assert.equal(readSelection(styledDoc(active, 'none')), null, autocomplete);
+  }
+  const plain = masked({ getAttribute: (name) => (name === 'autocomplete' ? 'username' : null) });
+  assert.equal(readSelection(styledDoc(plain, 'none')), 'secret');
+});
+
+test('selection: a field masked with CSS is never read', () => {
+  for (const security of ['disc', 'circle', 'square']) {
+    assert.equal(readSelection(styledDoc(masked(), security)), null, security);
+  }
+  assert.equal(readSelection(styledDoc(masked(), 'none')), 'secret');
+  assert.equal(readSelection(styledDoc(masked(), '')), 'secret', 'an engine without the property');
+});
+
+test('the 504 says whether the extension ever took the command', async (t) => {
+  const quiet = await start(t, { answerTimeoutMs: 20, pollHoldMs: 5 });
+  const nobody = await ask(quiet.port, { cmd: 'tabs' });
+  assert.equal(nobody.status, 504);
+  assert.match(nobody.json.error, /switched on/);
+
+  const busy = await start(t, { answerTimeoutMs: 60 });
+  const answer = ask(busy.port, { cmd: 'tabs' });
+  assert.equal((await next(busy.port)).status, 200);
+  const taken = await answer;
+  assert.equal(taken.status, 504);
+  assert.doesNotMatch(taken.json.error, /switched on/);
+  assert.match(taken.json.error, /took the command/);
+});
+
+test('a queued command is dropped when its asker hangs up', async (t) => {
+  const { port } = await start(t, { pollHoldMs: 10 });
+  await new Promise((done) => {
+    const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/ask' });
+    req.on('error', () => {});
+    req.end('{"cmd":"close"}', () => setTimeout(() => {
+      req.destroy();
+      setTimeout(done, 40);
+    }, 40));
+  });
+  assert.equal((await next(port)).status, 204, 'nothing left to run');
+});
+
+test('off macOS, the default log path fails clearly', () => {
+  assert.throws(() => defaultLogPath('linux'), /macOS/);
+  assert.match(defaultLogPath('darwin'), /Library\/Caches/);
+});
+
+test('a slow click is not a dead one: the command limit leaves room for it and sits inside the asker\'s wait', () => {
+  const source = readFileSync(new URL('../tools/bridge.js', import.meta.url), 'utf8');
+  const asker = Number(source.match(/ANSWER_TIMEOUT_MS = ([\d_]+)/)[1].replaceAll('_', ''));
+  assert.ok(DEFAULT_SETTINGS.bridgeCommandTimeoutMs > 5000);
+  assert.ok(DEFAULT_SETTINGS.bridgeCommandTimeoutMs < asker);
 });

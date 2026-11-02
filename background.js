@@ -108,6 +108,7 @@ async function runCardAction(action, tabId) {
     await chrome.tabs.update(target.id, { active: true });
     await chrome.tabs.remove(tab.id);
   } else if (action === 'close-other') {
+    if (!copies.length) return { done: false };
     // One at a time, so each lands on Chrome's recently-closed stack for Cmd+Shift+T.
     for (const copy of copies) await chrome.tabs.remove(copy.id);
     await hideCard(tab.id);
@@ -282,6 +283,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 
 let bridgeUp = true;
 let polling = false;
+let pollAbort = null;
 
 function bridgeUrl(settings, path) {
   return `http://127.0.0.1:${settings.bridgePort}${path}`;
@@ -322,18 +324,30 @@ async function readTab(tabId) {
   return { frames, controls: numberControls(frames) };
 }
 
+const debuggerTabs = new Set();
+
 // Attached only for the action and detached right after, so Chrome's "is debugging this browser" bar stays brief.
 async function withDebugger(tabId, action) {
   const target = { tabId };
   await chrome.debugger.attach(target, '1.3');
+  debuggerTabs.add(tabId);
   try {
     return await action(target);
   } finally {
+    debuggerTabs.delete(tabId);
     await chrome.debugger.detach(target).catch(() => {});
   }
 }
 
-async function clickControl(tabId, wanted) {
+// For a command that ran out of time: its withDebugger may be stuck for good, so its finally cannot be relied on.
+async function releaseDebuggers() {
+  for (const tabId of [...debuggerTabs]) {
+    debuggerTabs.delete(tabId);
+    await withTimeout(chrome.debugger.detach({ tabId }), 2000).catch(() => {});
+  }
+}
+
+async function clickControl(tabId, wanted, signal) {
   const { controls } = await readTab(tabId);
   const control = findControl(controls, wanted);
   if (!control) throw new Error(`no control matches ${JSON.stringify(wanted)}`);
@@ -345,6 +359,8 @@ async function clickControl(tabId, wanted) {
   if (point.error) throw new Error(point.error);
   if (point.clicked) return { label: control.label, via: 'dom' };
 
+  // A page that was hung may recover long after the asker was told this failed. Do not click it then.
+  signal?.throwIfAborted();
   await withDebugger(tabId, async (target) => {
     const mouse = (type, extra = {}) => chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type, x: point.x, y: point.y, ...extra });
     await mouse('mouseMoved');
@@ -395,7 +411,7 @@ const BRIDGE_COMMANDS = {
       controls,
     };
   },
-  click: async (command) => clickControl((await tabFor(command)).id, command.target),
+  click: async (command, signal) => clickControl((await tabFor(command)).id, command.target, signal),
   type: async (command) => withDebugger((await tabFor(command)).id, async (target) => {
     await chrome.debugger.sendCommand(target, 'Input.insertText', { text: command.text });
     return { typed: command.text.length };
@@ -411,13 +427,28 @@ const BRIDGE_COMMANDS = {
   },
 };
 
-async function runBridgeCommand(command) {
+/**
+ * Runs one command within its time limit. A hung page never answers script injection or CDP input, so without a limit
+ * one command would hold the bridge and the debugger for good. The command itself cannot be cancelled, only abandoned.
+ */
+async function runBridgeCommand(command, limitMs) {
   const run = BRIDGE_COMMANDS[command.cmd];
   if (!run) return { id: command.id, error: `unknown command: ${command.cmd}` };
+  const abandoned = new AbortController();
+  let timer;
+  const expired = new Promise((_, fail) => {
+    timer = setTimeout(() => {
+      abandoned.abort();
+      fail(new Error(`${command.cmd} did not finish in ${Math.round(limitMs / 1000)} s. The page may be hung.`));
+    }, limitMs);
+  });
   try {
-    return { id: command.id, result: await run(command) };
+    return { id: command.id, result: await Promise.race([run(command, abandoned.signal), expired]) };
   } catch (error) {
+    if (abandoned.signal.aborted) await releaseDebuggers();
     return { id: command.id, error: error.message ?? String(error) };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -425,23 +456,41 @@ async function runBridgeCommand(command) {
  * One poll per alarm tick, and at once again after a command. The server holds an empty poll for about 25 s and an
  * asker for about 95 s, so a command landing between polls waits for the next tick rather than being lost. A dead
  * server costs one failed fetch.
+ *
+ * Switching off aborts a held poll, and the setting is read afresh before each poll and each command, so nothing runs
+ * once it is off.
  */
 async function pollBridge() {
-  const settings = await getSettings();
-  if (!settings.bridgeEnabled || polling) return;
+  if (polling) return;
   polling = true;
   try {
     for (;;) {
-      const response = await fetch(bridgeUrl(settings, '/next'), { headers: BRIDGE_HEADERS, signal: AbortSignal.timeout(POLL_TIMEOUT_MS) });
+      const settings = await getSettings();
+      if (!settings.bridgeEnabled) return;
+      pollAbort = new AbortController();
+      const response = await fetch(bridgeUrl(settings, '/next'), {
+        headers: BRIDGE_HEADERS,
+        signal: AbortSignal.any([pollAbort.signal, AbortSignal.timeout(POLL_TIMEOUT_MS)]),
+      });
       bridgeUp = true;
       if (response.status !== 200) return;
-      const answer = await runBridgeCommand(await response.json());
-      await fetch(bridgeUrl(settings, '/result'), { method: 'POST', headers: BRIDGE_HEADERS, body: JSON.stringify(answer) });
+      const command = await response.json();
+      const latest = await getSettings();
+      const answer = latest.bridgeEnabled
+        ? await runBridgeCommand(command, latest.bridgeCommandTimeoutMs)
+        : { id: command.id, error: 'the bridge was switched off before this command ran' };
+      await fetch(bridgeUrl(settings, '/result'), {
+        method: 'POST',
+        headers: BRIDGE_HEADERS,
+        body: JSON.stringify(answer),
+        signal: AbortSignal.timeout(POLL_TIMEOUT_MS),
+      });
     }
   } catch {
     bridgeUp = false;
   } finally {
     polling = false;
+    pollAbort = null;
   }
 }
 
@@ -449,6 +498,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes.settings) return;
   const before = withDefaults(changes.settings.oldValue);
   const after = withDefaults(changes.settings.newValue);
+  if (before.bridgeEnabled && !after.bridgeEnabled) pollAbort?.abort();
   if (after.bridgeEnabled && !before.bridgeEnabled) {
     bridgeUp = true;
     pollBridge();

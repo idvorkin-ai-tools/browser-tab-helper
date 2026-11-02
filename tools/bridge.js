@@ -8,6 +8,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import http from 'node:http';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { isEntryPoint, requireMacOS } from './entry.js';
 
 export const DEFAULT_PORT = 8787;
 const EXTENSION_HEADER = 'x-browser-tab-helper';
@@ -16,7 +17,8 @@ const ANSWER_TIMEOUT_MS = 95_000;
 const POLL_HOLD_MS = 25_000;
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
 
-export function defaultLogPath() {
+export function defaultLogPath(platform = process.platform) {
+  requireMacOS('The event log path', platform);
   return join(homedir(), 'Library', 'Caches', 'browser-tab-helper', 'events.jsonl');
 }
 
@@ -82,6 +84,7 @@ export function createBridge({
   };
 
   const handleAsk = (res, body) => {
+    // ponytail: a hung-up asker is only noticed once its whole body has arrived. That is fine for a local client.
     let command;
     try {
       command = JSON.parse(body);
@@ -94,13 +97,28 @@ export function createBridge({
       return;
     }
     const id = nextId++;
-    const timer = setTimeout(() => {
+    // Withdraws a command nobody has taken, which reports whether anybody had.
+    const withdraw = () => {
       waiting.delete(id);
       const at = queue.findIndex((queued) => queued.id === id);
       if (at >= 0) queue.splice(at, 1);
-      json(res, 504, { error: `no answer in ${Math.round(answerTimeoutMs / 1000)} s. Is the bridge switched on in the list page?` });
+      return at >= 0;
+    };
+    const timer = setTimeout(() => {
+      const seconds = Math.round(answerTimeoutMs / 1000);
+      json(res, 504, {
+        error: withdraw()
+          ? `no extension took the command in ${seconds} s. Is the bridge switched on in the list page?`
+          : `the extension took the command but gave no answer in ${seconds} s`,
+      });
     }, answerTimeoutMs);
     waiting.set(id, { res, timer });
+    // An asker that hangs up no longer wants it run.
+    res.on('close', () => {
+      if (res.writableFinished) return;
+      clearTimeout(timer);
+      withdraw();
+    });
     deliver({ ...command, id });
   };
 
@@ -178,9 +196,15 @@ export function createBridge({
   };
 }
 
-if (import.meta.main) {
+if (isEntryPoint(import.meta.url)) {
   const wanted = Number(process.argv[2] ?? process.env.BRIDGE_PORT ?? DEFAULT_PORT);
-  const bridge = createBridge();
+  let bridge;
+  try {
+    bridge = createBridge();
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
   const port = await bridge.listen(wanted);
   console.log(`Bridge on http://127.0.0.1:${port}. Events go to ${defaultLogPath()}.`);
   console.log('While this runs, any local process can drive your browser. Stop it (Ctrl-C) when you are done.');

@@ -2,14 +2,18 @@
 // text, so each one must stand alone: no imports, no outer variables.
 
 /**
- * R7: the page's selected text, or null. A password field's selection is never read: when focus is in one, the
- * answer is null however much else is selected.
+ * R7: the page's selected text, or null. A masked field's selection is never read: when focus is in one, the answer is
+ * null however much else is selected. Masked means type=password, autocomplete naming a password, or a field masked
+ * with CSS, as sites do to stop browsers offering to save it. This errs towards returning nothing.
  */
 export function readSelection(doc = document) {
   let active = doc.activeElement;
   while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
   const tag = active?.tagName?.toLowerCase();
   if (tag === 'input' && (active.type ?? '').toLowerCase() === 'password') return null;
+  if ((active?.getAttribute?.('autocomplete') ?? '').toLowerCase().includes('password')) return null;
+  const security = active && doc.defaultView?.getComputedStyle?.(active)?.getPropertyValue('-webkit-text-security');
+  if (security && security !== 'none') return null;
 
   // getSelection() does not report text selected inside a field.
   if (tag === 'textarea' || tag === 'input') {
