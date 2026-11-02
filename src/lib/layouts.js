@@ -5,6 +5,8 @@ import { cleanTitle } from './titles.js';
 export const COLORS = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
 
 function isWebUrl(url) {
+  // new URL() stringifies its argument, so ['https://a.test/'] would otherwise pass here and fail in chrome.tabs.
+  if (typeof url !== 'string') return false;
   try {
     const { protocol } = new URL(url);
     return protocol === 'http:' || protocol === 'https:';
@@ -19,7 +21,7 @@ function checkTab(tab, where, errors, { inGroup }) {
     return;
   }
   if (tab.url === undefined) errors.push(`${where}: no url (use null for a placeholder)`);
-  else if (tab.url !== null && !isWebUrl(tab.url)) errors.push(`${where}: not an http(s) URL: ${tab.url}`);
+  else if (tab.url !== null && !isWebUrl(tab.url)) errors.push(`${where}: not an http(s) URL: ${JSON.stringify(tab.url)}`);
   if (tab.title !== undefined && typeof tab.title !== 'string') errors.push(`${where}: title is not a string`);
   if (tab.pinned !== undefined && typeof tab.pinned !== 'boolean') errors.push(`${where}: pinned is not true or false`);
   if (inGroup && tab.pinned) errors.push(`${where}: a pinned tab cannot be in a group`);

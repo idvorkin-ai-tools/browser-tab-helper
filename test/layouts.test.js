@@ -163,3 +163,10 @@ test('restore keeps items in order, with their matches in the right places', () 
     { kind: 'tab', url: 'https://c.test/', pinned: true, tabId: 3 },
   ]);
 });
+
+test('a URL must be a string: an array that stringifies to a good URL is refused', () => {
+  assert.match(validateLayout(good([{ url: ['https://a.test/'] }])).join(), /not an http\(s\) URL/);
+  assert.match(validateLayout(good([{ group: 'g', tabs: [{ url: ['https://a.test/'] }] }])).join(), /not an http\(s\) URL/);
+  assert.match(validateLayout(good([{ url: { toString: 'x' } }])).join(), /not an http\(s\) URL/);
+  assert.match(validateLayout(good([{ url: 5 }])).join(), /not an http\(s\) URL/);
+});
