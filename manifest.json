@@ -1,0 +1,64 @@
+{
+  "manifest_version": 3,
+  "name": "Browser Tab Helper",
+  "version": "0.1.0",
+  "description": "Catches duplicate tabs, lists every tab, saves and restores layouts, and tells local tools what page is in front.",
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "storage",
+    "sessions",
+    "alarms",
+    "scripting",
+    "clipboardRead",
+    "nativeMessaging",
+    "debugger"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "All tabs",
+    "default_icon": {
+      "16": "src/icons/icon16.png",
+      "48": "src/icons/icon48.png",
+      "128": "src/icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "src/icons/icon16.png",
+    "48": "src/icons/icon48.png",
+    "128": "src/icons/icon128.png"
+  },
+  "options_ui": {
+    "page": "src/page/list.html",
+    "open_in_tab": true
+  },
+  "commands": {
+    "dup-jump": {
+      "suggested_key": { "default": "Alt+Shift+D" },
+      "description": "Duplicate: jump to the existing tab, close this one"
+    },
+    "dup-bring": {
+      "suggested_key": { "default": "Alt+Shift+B" },
+      "description": "Duplicate: bring the existing tab here, close this one"
+    },
+    "dup-close-other": {
+      "suggested_key": { "default": "Alt+Shift+X" },
+      "description": "Duplicate: stay here, close the other copies"
+    },
+    "dup-keep": {
+      "suggested_key": { "default": "Alt+Shift+K" },
+      "description": "Duplicate: keep both, stop asking about this URL for an hour"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://docs.google.com/*"],
+      "js": ["src/content/docs-tab.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

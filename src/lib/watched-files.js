@@ -1,0 +1,27 @@
+// R9: what the self-reload watches. A service worker cannot list a directory, so the list is written out and a test
+// keeps it equal to what is on disk.
+export const WATCHED_FILES = [
+  'manifest.json',
+  'background.js',
+  'src/banner/banner.js',
+  'src/content/docs-tab.js',
+  'src/data/aliases.js',
+  'src/data/kinds.js',
+  'src/lib/card.js',
+  'src/lib/controls.js',
+  'src/lib/duplicates.js',
+  'src/lib/kinds.js',
+  'src/lib/layouts.js',
+  'src/lib/normalize.js',
+  'src/lib/page-scripts.js',
+  'src/lib/sections.js',
+  'src/lib/settings.js',
+  'src/lib/titles.js',
+  'src/lib/undo.js',
+  'src/lib/view.js',
+  'src/lib/watched-files.js',
+  'src/lib/window-names.js',
+  'src/page/list.css',
+  'src/page/list.html',
+  'src/page/list.js',
+];
