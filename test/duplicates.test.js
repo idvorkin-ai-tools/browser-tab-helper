@@ -149,3 +149,71 @@ test('the card lists the keys actually bound', () => {
   assert.equal(card.actions.find((a) => a.id === 'jump').shortcut, '⌥⇧D');
   assert.equal(card.actions.find((a) => a.id === 'bring').shortcut, null);
 });
+
+// ---- Review findings: alias rules must not call different pages one place ----
+
+const SHIPPED = compileRules(ALIAS_RULES);
+const door = (url) => doorOf(url, SHIPPED)?.door ?? null;
+
+test('shipped rules: only the front door itself counts as another door', () => {
+  assert.equal(door('https://gmail.com/'), 'other');
+  assert.equal(door('https://www.gmail.com/'), 'other');
+  assert.equal(door('https://gmail.com/?utm_source=x'), 'other');
+  assert.equal(door('https://gmail.com/some/deep/page'), null);
+  assert.equal(door('https://www.google.com/calendar'), 'other');
+  assert.equal(door('https://www.google.com/calendar/'), 'other');
+  assert.equal(door('https://www.google.com/calendarium-history'), null);
+  assert.equal(door('https://www.google.com/calendar/about/help'), null);
+});
+
+test('shipped rules: another account is not the canonical door', () => {
+  assert.equal(door('https://mail.google.com/mail/u/0/'), 'canonical');
+  assert.equal(door('https://mail.google.com/mail/u/0/#inbox/abc'), 'canonical');
+  assert.equal(door('https://mail.google.com/mail/u/1/'), null);
+  assert.equal(door('https://mail.google.com/mail/u/10/'), null);
+  assert.equal(door('https://calendar.google.com/calendar/u/0/r'), 'canonical');
+  assert.equal(door('https://calendar.google.com/calendar/u/1/r'), null);
+  assert.equal(door('https://www.google.com/calendar/u/1/'), null);
+});
+
+test('shipped rules: Close N duplicates cannot take a real page', () => {
+  const canonical = tab(1, 'https://mail.google.com/mail/u/0/');
+  assert.deepEqual(duplicateGroups([canonical, tab(2, 'https://gmail.com/some/deep/page')], SHIPPED), []);
+  assert.deepEqual(duplicateGroups([tab(3, 'https://mail.google.com/mail/u/1/'), tab(4, 'https://gmail.com/')], SHIPPED), []);
+  assert.deepEqual(duplicateGroups([tab(5, 'https://calendar.google.com/calendar/u/0/r'), tab(6, 'https://www.google.com/calendarium-history')], SHIPPED), []);
+  const [real] = duplicateGroups([canonical, tab(7, 'https://gmail.com/')], SHIPPED);
+  assert.deepEqual(real.extras.map((t) => t.id), [7], 'the true door still groups');
+});
+
+test('a tab is never listed twice in copies', () => {
+  const rules = compileRules([{
+    name: 'X',
+    canonical: 'https://x.test/a?utm_id=canon',
+    canonicalPattern: 'utm_id=canon',
+    otherDoors: ['^https://x\\.test/a$'],
+  }]);
+  const lander = tab(9, 'https://x.test/a');
+  const decision = decideCard(lander, [tab(5, 'https://x.test/a?utm_id=canon'), lander], { rules });
+  assert.deepEqual(decision.copies.map((t) => t.id), [5]);
+});
+
+test('Close the other takes older copies only (R2)', () => {
+  const lander = tab(5, 'https://a.test/');
+  const decision = decideCard(lander, [tab(3, 'https://a.test/'), lander, tab(8, 'https://a.test/')]);
+  assert.deepEqual(decision.copies.map((t) => t.id), [3]);
+});
+
+test('with no older copy the card has no Close the other, and Jump still has a target', () => {
+  const older = tab(2, 'https://a.test/');
+  const decision = decideCard(older, [older, tab(8, 'https://a.test/')]);
+  assert.equal(decision.target.id, 8);
+  assert.deepEqual(decision.copies, []);
+  assert.ok(!buildCard(decision, older).actions.some((a) => a.id === 'close-other'));
+});
+
+test('alias: a newer canonical tab is the target but is not an older copy', () => {
+  const door_ = tab(1, 'https://example.com/mail');
+  const decision = decideCard(door_, [door_, tab(8, 'https://mail.example.com/inbox')], { rules: RULES });
+  assert.equal(decision.target.id, 8);
+  assert.deepEqual(decision.copies, []);
+});

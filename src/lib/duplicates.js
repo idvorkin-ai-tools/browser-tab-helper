@@ -26,10 +26,16 @@ function byKeeper(compiled) {
     || a.id - b.id;
 }
 
+/** What Close the other closes: the tabs older than this one, each once. A tab can be both target and same-key. */
+function olderCopies(tab, candidates) {
+  const byId = new Map(candidates.filter((other) => other.id < tab.id).map((other) => [other.id, other]));
+  return [...byId.values()];
+}
+
 /**
  * What to ask when `tab` lands.
- * - { kind: 'duplicate', target, copies }: another tab is this page. `target` is where Jump goes, `copies` what
- *   Close the other closes.
+ * - { kind: 'duplicate', target, copies }: another tab is this page. `target` is where Jump goes, `copies` the older
+ *   tabs Close the other closes, which may be none.
  * - { kind: 'offer', rule }: another door with no canonical tab open.
  * - null: nothing to ask.
  */
@@ -47,14 +53,14 @@ export function decideCard(tab, tabs, { rules = [], muted = {}, now = 0 } = {}) 
     if (canonicalTabs.length) {
       // The canonical tab wins even when it is the newer one, and even when this other-door tab is pinned.
       const [target] = [...canonicalTabs].sort(byKeeper(rules));
-      return { kind: 'duplicate', target, copies: [target, ...sameKey], rule: door.rule };
+      return { kind: 'duplicate', target, copies: olderCopies(tab, [target, ...sameKey]), rule: door.rule };
     }
     if (!sameKey.length) return { kind: 'offer', rule: door.rule };
   }
 
   if (!sameKey.length) return null;
   const [target] = [...sameKey].sort(byKeeper(rules));
-  return { kind: 'duplicate', target, copies: sameKey };
+  return { kind: 'duplicate', target, copies: olderCopies(tab, sameKey) };
 }
 
 /**

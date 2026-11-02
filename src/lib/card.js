@@ -36,7 +36,7 @@ export function buildCard(decision, tab, shortcuts = {}) {
   const closeLabel = copies.length > 1 ? `Close the other ${copies.length}` : 'Close the other';
   const actions = [action('jump', ['j'], 'Jump to it', true)];
   if (otherWindow) actions.push(action('bring', ['b'], 'Bring here'));
-  actions.push(action('close-other', ['x', 'c'], closeLabel));
+  if (copies.length) actions.push(action('close-other', ['x', 'c'], closeLabel));
   actions.push(action('keep', ['k'], 'Keep both'));
   return {
     heading: decision.rule
