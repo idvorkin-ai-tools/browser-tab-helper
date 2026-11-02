@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "example",
+  "windows": [
+    {
+      "items": [
+        { "title": "Example Domain", "url": "https://example.com/", "pinned": true },
+        {
+          "group": "Reading",
+          "color": "blue",
+          "collapsed": false,
+          "tabs": [
+            { "title": "Tab (interface)", "url": "https://en.wikipedia.org/wiki/Tab_(interface)" },
+            { "title": "chrome.tabs", "url": "https://developer.chrome.com/docs/extensions/reference/api/tabs" }
+          ]
+        },
+        { "title": "Not found yet", "url": null, "todo": "a placeholder: restore lists it as skipped and never guesses" }
+      ]
+    }
+  ]
+}
