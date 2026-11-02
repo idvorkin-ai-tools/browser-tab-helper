@@ -7,6 +7,9 @@
   "bin": {
     "host": "tools/host.js"
   },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
     "test:e2e": "node test/e2e/run.js",

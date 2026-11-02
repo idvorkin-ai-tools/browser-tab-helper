@@ -82,3 +82,26 @@ test('the repo holds nothing but neutral public URLs in layouts/', () => {
     for (const url of urls) assert.match(url, allowed, `${relative(ROOT, file)}: ${url}`);
   }
 });
+
+test('no tool depends on import.meta.main, which is silently undefined on older Node', () => {
+  for (const file of [...walk(join(ROOT, 'tools')), ...walk(join(ROOT, 'test/e2e'))]) {
+    assert.doesNotMatch(readFileSync(file, 'utf8'), /import\.meta\.main/, relative(ROOT, file));
+  }
+  assert.ok(package_.engines?.node, 'package.json says which Node it needs');
+});
+
+test('a page capture cannot be committed by accident', () => {
+  assert.match(readFileSync(join(ROOT, '.gitignore'), 'utf8'), /^screenshot\.png$/m);
+});
+
+test('the public docs link only to what a reader can open', () => {
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  assert.doesNotMatch(readme, /github\.com\/idvorkin\/(?!browser-tab-helper)/);
+  assert.match(readme, /docs\/requirements\.md/);
+  assert.ok(existsSync(join(ROOT, 'docs/requirements.md')));
+});
+
+test('the requirements cover R1 to R9', () => {
+  const text = readFileSync(join(ROOT, 'docs/requirements.md'), 'utf8');
+  for (let n = 1; n <= 9; n++) assert.match(text, new RegExp(`^## R${n}\\b`, 'm'));
+});

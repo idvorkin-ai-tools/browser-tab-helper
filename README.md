@@ -9,8 +9,10 @@ A Chrome extension (Manifest V3, plain JavaScript modules, no build step, no run
 - tells local tools which page is in front, through a native messaging host, and
 - lets local tools drive the browser through an opt-in bridge.
 
-Specified in [idvorkin/alfred#28](https://github.com/idvorkin/alfred/issues/28). The native host serves the agent
-sender in [idvorkin/alfred#29](https://github.com/idvorkin/alfred/issues/29).
+What it must do is in [docs/requirements.md](docs/requirements.md).
+
+**macOS only.** The native host, its manifest and the event log use macOS paths, and the tools say so and stop elsewhere.
+Node 22 or later.
 
 ## Install
 
@@ -41,7 +43,7 @@ state there.
 | ---------- | --------------- | ------ |
 | `j`, Enter | ⌥⇧D | **Jump to it**: focus the existing tab, close this duplicate |
 | `b`        | ⌥⇧B | **Bring here**: move the existing tab here and close this duplicate (only when it is in another window) |
-| `x`, `c`   | ⌥⇧X | **Close the other**: stay here, close every other copy (Cmd+Shift+T brings them back) |
+| `x`, `c`   | ⌥⇧X | **Close the other**: stay here, close every older copy (only when there is one; Cmd+Shift+T brings them back) |
 | `k`        | ⌥⇧K | **Keep both**: dismiss, and stop asking about this URL for an hour |
 | Esc        |     | Dismiss, as do a click on the backdrop and × |
 
@@ -103,9 +105,11 @@ Events*. When the extension starts, Chrome starts the host, which listens on a U
 printf '{"type":"front"}\n' | nc -U ~/Library/Caches/browser-tab-helper/host.sock
 ```
 
-`selection` is `null` when nothing is selected, when focus is in a password field (whose selection is never read), and on
-pages that refuse scripts (`chrome://`, canvas-drawn pages such as Google Docs). The selection is read only when asked,
-so no script is added to every page.
+`selection` is `null` when nothing is selected, on pages that refuse scripts (`chrome://`, canvas-drawn pages such as
+Google Docs), and when focus is in a masked field, whose selection is never read: `type=password`, `autocomplete`
+containing `password`, or computed `-webkit-text-security` other than `none`. A field masked with CSS for some other
+reason therefore answers `null` too, which is the safe way to be wrong. The selection is read only when asked, so no
+script is added to every page.
 
 **When the socket is missing**, the host is not installed or Chrome is not running. Callers should fall back to
 AppleScript for the title and URL, and say to run `node tools/host.js install`.
@@ -139,6 +143,13 @@ polls is not lost, but the first one can take up to 30 s. A dead server costs on
 `chrome.debugger`, attached only for the action and detached right after, so Chrome's "started debugging" bar flashes.
 Extension events are appended to `~/Library/Caches/browser-tab-helper/events.jsonl`.
 
+Switching the bridge off takes effect at once: the held poll is dropped and no further command runs. A command that does
+not finish in 60 s, as on a hung page, answers with an error and lets go of the debugger. It cannot be cancelled, only
+abandoned, so a slow `restore-layout` may still finish afterwards.
+
+A click on a background tab lands, but took about 5 s in headless Chromium, against about 20 ms on the active tab of any
+window. `activate` first if that matters. `type` and `key` are not affected.
+
 ## Development
 
 ```bash
@@ -156,3 +167,6 @@ a test enforces that for `src/lib` and `src/data`. A new file must also go in
 The extension reloads itself within about 30 s of any change to a watched file, the manifest included. The switch is at
 the bottom of the list page. The banner is injected fresh each time, so an edit to it takes effect on the next duplicate
 even with that switched off.
+
+The watcher runs in the worker, so a syntax error in `background.js` or anything it imports stops the watcher too. Fix the
+error and press reload at `chrome://extensions`. A reload also resets the list page's filter, lens and undo toasts.
