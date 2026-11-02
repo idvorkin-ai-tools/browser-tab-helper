@@ -40,8 +40,35 @@ export function nextRestoreStep(entries, remaining) {
   return { sessionId: entrySessionId(entry), covers };
 }
 
-export function moveRecord(tab) {
-  return { tabId: tab.id, fromWindowId: tab.windowId, fromIndex: tab.index, groupId: tab.groupId ?? -1 };
+/** `group` is the tab's group as it stands, kept because moving a group's last tab out makes Chrome delete the group. */
+export function moveRecord(tab, group = null) {
+  return {
+    tabId: tab.id,
+    fromWindowId: tab.windowId,
+    fromIndex: tab.index,
+    groupId: tab.groupId ?? -1,
+    group: group ? { title: group.title, color: group.color, collapsed: group.collapsed } : null,
+  };
+}
+
+/**
+ * The groups to put moved tabs back into, once they are back in place. `recreate` holds a group's properties when
+ * Chrome deleted it, and is null when it still exists and the tabs only rejoin it.
+ */
+export function groupRestores(records, liveGroupIds) {
+  const byGroup = new Map();
+  for (const record of records) {
+    if (record.groupId === -1) continue;
+    if (!byGroup.has(record.groupId)) {
+      byGroup.set(record.groupId, {
+        groupId: record.groupId,
+        tabIds: [],
+        recreate: liveGroupIds.includes(record.groupId) ? null : (record.group ?? {}),
+      });
+    }
+    byGroup.get(record.groupId).tabIds.push(record.tabId);
+  }
+  return [...byGroup.values()];
 }
 
 /**
@@ -53,12 +80,26 @@ export function undoMoveOrder(records) {
 }
 
 /**
- * The index for chrome.tabs.move when dropping tabs so they land before the tab now at `beforeIndex` in the target
- * window. Chrome's index is where the tab ends up, after the moved tabs have left, so each moved tab already left
- * of the drop point shifts it one to the left. null means the end of the window.
+ * The chrome.tabs.move calls, one tab at a time, that put `movingIds`, in that order, before the tab now at
+ * `beforeIndex` in the target window (`strip`, its tab ids in order). null means the end of the window.
+ *
+ * Not one call with an array: Chrome moves the ids in turn to index, index + 1, and so on, and each tab that leaves from
+ * the left shifts the rest, so A,B dragged to before D in A,B,C,D,E comes out A,C,B,D,E. Instead this works backwards,
+ * inserting each tab just before the one placed after it, which holds wherever each tab started.
  */
-export function dropIndex(moving, targetWindowId, beforeIndex) {
-  if (beforeIndex === null) return -1;
-  const leaving = moving.filter((tab) => tab.windowId === targetWindowId && tab.index < beforeIndex).length;
-  return beforeIndex - leaving;
+export function moveSteps(strip, movingIds, beforeIndex) {
+  const moving = new Set(movingIds);
+  const current = [...strip];
+  // A row that is itself moving cannot be the anchor, so the drop point is the next one staying put.
+  let anchor = beforeIndex === null ? null : strip.slice(beforeIndex).find((id) => !moving.has(id)) ?? null;
+  const steps = [];
+  for (const id of [...movingIds].reverse()) {
+    const from = current.indexOf(id);
+    if (from >= 0) current.splice(from, 1);
+    const index = anchor === null ? current.length : current.indexOf(anchor);
+    current.splice(index, 0, id);
+    steps.push({ id, index });
+    anchor = id;
+  }
+  return steps;
 }

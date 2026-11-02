@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { closeRecord, dropIndex, moveRecord, nextRestoreStep, undoMoveOrder } from '../src/lib/undo.js';
+import { closeRecord, groupRestores, moveRecord, moveSteps, nextRestoreStep, undoMoveOrder } from '../src/lib/undo.js';
 
 // A stand-in for Chrome's tab strip and its sessions stack, so the ordering rule is tested as behaviour:
 // closing pushes an entry with the index the tab left from, restoring puts it back at that index.
@@ -101,17 +101,83 @@ test('undoing moves puts every tab back, whatever moved', () => {
   const original = ['a', 'b', 'c', 'd', 'e', 'f'].map((url, id) => ({ id, url, windowId: 1, index: id }));
   const strip = [...original];
   const moved = [original[1], original[2], original[4]];
-  const records = moved.map(moveRecord);
+  const records = moved.map((tab) => moveRecord(tab));
   moved.forEach((tab, i) => move(strip, tab.id, 3 + i));
   assert.notDeepEqual(strip.map((t) => t.url), ['a', 'b', 'c', 'd', 'e', 'f']);
   for (const record of undoMoveOrder([...records].reverse())) move(strip, record.tabId, record.fromIndex);
   assert.deepEqual(strip.map((t) => t.url), ['a', 'b', 'c', 'd', 'e', 'f']);
 });
 
-test('dropIndex accounts for moved tabs that leave from the left of the drop point', () => {
-  const tabs = [{ windowId: 1, index: 0 }, { windowId: 1, index: 5 }, { windowId: 2, index: 1 }];
-  assert.equal(dropIndex(tabs, 1, 3), 2, 'one target-window tab sits left of index 3');
-  assert.equal(dropIndex(tabs, 2, 1), 1, 'a tab at the drop point does not shift it');
-  assert.equal(dropIndex(tabs, 3, 4), 4, 'all from other windows');
-  assert.equal(dropIndex(tabs, 1, null), -1, 'null is the end');
+// Chrome's semantics for one tab: it ends up at `index`, measured after it has left. -1 is the end.
+function applySteps(strip, steps) {
+  const out = [...strip];
+  for (const { id, index } of steps) {
+    const from = out.indexOf(id);
+    if (from >= 0) out.splice(from, 1);
+    out.splice(index < 0 ? out.length : index, 0, id);
+  }
+  return out;
+}
+
+test('moveSteps: several rows dragged rightward keep their order', () => {
+  const strip = ['A', 'B', 'C', 'D', 'E'];
+  assert.deepEqual(applySteps(strip, moveSteps(strip, ['A', 'B'], 3)), ['C', 'A', 'B', 'D', 'E']);
+  assert.deepEqual(applySteps(strip, moveSteps(strip, ['A', 'C'], 4)), ['B', 'D', 'A', 'C', 'E']);
+});
+
+test('moveSteps: leftward, to the end, and across the drop point', () => {
+  const strip = ['A', 'B', 'C', 'D', 'E'];
+  assert.deepEqual(applySteps(strip, moveSteps(strip, ['D', 'E'], 1)), ['A', 'D', 'E', 'B', 'C']);
+  assert.deepEqual(applySteps(strip, moveSteps(strip, ['B', 'D'], null)), ['A', 'C', 'E', 'B', 'D']);
+  assert.deepEqual(applySteps(strip, moveSteps(strip, ['A', 'E'], 2)), ['B', 'A', 'E', 'C', 'D']);
+  assert.deepEqual(applySteps(strip, moveSteps(strip, ['E', 'A'], 2)), ['B', 'E', 'A', 'C', 'D'], 'selection order wins');
+});
+
+test('moveSteps: dropping on a row that is itself moving lands before the next one that is not', () => {
+  const strip = ['A', 'B', 'C', 'D'];
+  assert.deepEqual(applySteps(strip, moveSteps(strip, ['A', 'B'], 1)), ['A', 'B', 'C', 'D']);
+  assert.deepEqual(applySteps(strip, moveSteps(strip, ['D', 'B'], 1)), ['A', 'D', 'B', 'C']);
+});
+
+test('moveSteps: tabs from another window come in at the drop point, in order', () => {
+  const strip = ['A', 'B'];
+  assert.deepEqual(applySteps(strip, moveSteps(strip, ['X', 'Y'], 1)), ['A', 'X', 'Y', 'B']);
+  assert.deepEqual(applySteps(strip, moveSteps(strip, ['X', 'A'], 2)), ['B', 'X', 'A']);
+  assert.deepEqual(applySteps(strip, moveSteps(strip, ['X', 'Y'], null)), ['A', 'B', 'X', 'Y']);
+});
+
+test('moveSteps holds for every subset and drop point of a strip', () => {
+  const strip = ['A', 'B', 'C', 'D', 'E'];
+  for (let mask = 1; mask < 32; mask++) {
+    const moving = strip.filter((_, i) => mask & (1 << i));
+    for (let before = 0; before <= strip.length; before++) {
+      const at = before === strip.length ? null : before;
+      const result = applySteps(strip, moveSteps(strip, moving, at));
+      const rest = strip.filter((id) => !moving.includes(id));
+      const anchor = strip.slice(before).find((id) => !moving.includes(id));
+      const place = anchor ? rest.indexOf(anchor) : rest.length;
+      assert.deepEqual(result, [...rest.slice(0, place), ...moving, ...rest.slice(place)], `${moving} before ${at}`);
+    }
+  }
+});
+
+test('moveRecord remembers what is needed to bring a group back', () => {
+  const group = { id: 7, title: 'Reading', color: 'red', collapsed: true, windowId: 1 };
+  const record = moveRecord({ id: 1, windowId: 2, index: 3, groupId: 7 }, group);
+  assert.deepEqual(record.group, { title: 'Reading', color: 'red', collapsed: true });
+  assert.equal(moveRecord({ id: 1, windowId: 2, index: 3, groupId: -1 }).group, null);
+});
+
+test('groupRestores: a live group is rejoined, an emptied one is rebuilt once with all its tabs', () => {
+  const group = { title: 'T', color: 'blue', collapsed: false };
+  const records = [
+    { tabId: 1, groupId: 7, group },
+    { tabId: 2, groupId: 7, group },
+    { tabId: 3, groupId: 8, group: { title: 'Live', color: 'red', collapsed: false } },
+    { tabId: 4, groupId: -1, group: null },
+  ];
+  assert.deepEqual(groupRestores(records, [8]), [
+    { groupId: 7, tabIds: [1, 2], recreate: group },
+    { groupId: 8, tabIds: [3], recreate: null },
+  ]);
 });

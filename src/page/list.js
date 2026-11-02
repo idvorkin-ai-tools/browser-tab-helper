@@ -7,7 +7,7 @@ import { buildLayout, groupLayout, matchOpenTabs } from '../lib/layouts.js';
 import { formatSection, parseSection } from '../lib/sections.js';
 import { withDefaults } from '../lib/settings.js';
 import { rowTitle } from '../lib/titles.js';
-import { closeRecord, dropIndex, moveRecord, nextRestoreStep, undoMoveOrder } from '../lib/undo.js';
+import { closeRecord, groupRestores, moveRecord, moveSteps, nextRestoreStep, undoMoveOrder } from '../lib/undo.js';
 import { groupSections, nextSelection, orderWindows, visibleTabs } from '../lib/view.js';
 import { windowName } from '../lib/window-names.js';
 
@@ -34,6 +34,7 @@ const state = {
   lens: 'window',
   kindChip: null,
   onlyWindow: null,
+  hoverWindow: null,
   selected: new Set(),
   anchor: null,
   visibleIds: [],
@@ -151,12 +152,24 @@ async function undoCloses(records) {
 async function closeTabs(ids) {
   const tabs = ids.map(tabById).filter((tab) => tab && tab.id !== state.thisTabId);
   if (!tabs.length) return;
-  const records = tabs.map(closeRecord);
-  // One at a time, in order, so Chrome's recently-closed stack holds them the way undo expects.
-  for (const tab of tabs) await chrome.tabs.remove(tab.id);
+  const records = [];
+  const failures = [];
+  // One at a time, in order, so Chrome's recently-closed stack holds them the way undo expects. One that fails (it may
+  // have closed already) must not stop the rest or lose the undo for those that did close.
+  for (const tab of tabs) {
+    try {
+      await chrome.tabs.remove(tab.id);
+      records.push(closeRecord(tab));
+    } catch (error) {
+      failures.push(error.message);
+    }
+  }
   state.selected.clear();
-  toast(`Closed ${plural(tabs.length, 'tab')}`, () => undoCloses(records));
+  if (records.length) toast(`Closed ${plural(records.length, 'tab')}`, () => undoCloses(records));
+  if (failures.length) toast(`Could not close ${plural(failures.length, 'tab')}: ${failures[0]}`);
 }
+
+const recordMove = (tab) => moveRecord(tab, state.groups.find((group) => group.id === tab.groupId));
 
 async function undoMoves(records) {
   const windowIds = new Map();
@@ -171,10 +184,15 @@ async function undoMoves(records) {
       windowIds.set(record.fromWindowId, windowId);
     }
   }
-  const groups = await chrome.tabGroups.query({});
-  for (const record of records) {
-    if (record.groupId !== -1 && groups.some((group) => group.id === record.groupId)) {
-      await chrome.tabs.group({ groupId: record.groupId, tabIds: record.tabId });
+  const live = (await chrome.tabGroups.query({})).map((group) => group.id);
+  for (const { groupId, tabIds, recreate } of groupRestores(records, live)) {
+    if (recreate) {
+      // Moving a group's last tab out deleted it.
+      const { windowId } = await chrome.tabs.get(tabIds[0]);
+      const rebuilt = await chrome.tabs.group({ tabIds, createProperties: { windowId } });
+      await chrome.tabGroups.update(rebuilt, recreate);
+    } else {
+      await chrome.tabs.group({ groupId, tabIds });
     }
   }
 }
@@ -182,10 +200,22 @@ async function undoMoves(records) {
 async function moveTabs(ids, windowId, beforeIndex = null) {
   const tabs = ids.map(tabById).filter(Boolean);
   if (!tabs.length) return;
-  const records = tabs.map(moveRecord);
-  await chrome.tabs.move(tabs.map((tab) => tab.id), { windowId, index: dropIndex(tabs, windowId, beforeIndex) });
+  const strip = (await chrome.tabs.query({ windowId })).sort((a, b) => a.index - b.index).map((tab) => tab.id);
+  const records = new Map(tabs.map((tab) => [tab.id, recordMove(tab)]));
+  const moved = [];
+  let failure = null;
+  for (const { id, index } of moveSteps(strip, tabs.map((tab) => tab.id), beforeIndex)) {
+    try {
+      await chrome.tabs.move(id, { windowId, index });
+      moved.push(records.get(id));
+    } catch (error) {
+      failure = error;
+      break;
+    }
+  }
   state.selected.clear();
-  toast(`Moved ${plural(tabs.length, 'tab')}`, () => undoMoves(records));
+  if (moved.length) toast(`Moved ${plural(moved.length, 'tab')}`, () => undoMoves(moved));
+  if (failure) toast(`Could not move every tab: ${failure.message}`);
 }
 
 async function goToTab(tab) {
@@ -424,15 +454,21 @@ function render() {
   $('sections').replaceChildren(...(sections.length ? sections : [el('div', { className: 'empty', textContent: 'Nothing matches.' })]));
   state.visibleIds = [...$('sections').querySelectorAll('.row')].map((row) => Number(row.dataset.tab));
   renderSelectionBar();
+  applyHighlight(); // A live update redraws the rows, and the pointer may still be on a chip.
   timings.renderMs = performance.now() - started;
 }
 
 // ---- Window strip ----
 
-function highlightWindow(windowId) {
+function applyHighlight() {
   for (const row of document.querySelectorAll('#sections .row')) {
-    row.classList.toggle('highlight', windowId !== null && Number(row.dataset.window) === windowId);
+    row.classList.toggle('highlight', state.hoverWindow !== null && Number(row.dataset.window) === state.hoverWindow);
   }
+}
+
+function highlightWindow(windowId) {
+  state.hoverWindow = windowId;
+  applyHighlight();
 }
 
 // Delegated, since a click redraws the chips and a double-click's second click lands on a new element.
@@ -600,7 +636,7 @@ $('open-section').addEventListener('click', () => report('Open section', async (
   const openTabs = (await chrome.tabs.query({})).filter((tab) => tab.id !== state.thisTabId);
   const matches = matchOpenTabs(links.map((link) => link.url), openTabs);
   const moved = matches.filter(Boolean);
-  const records = moved.map(moveRecord);
+  const records = moved.map(recordMove);
   const tabIds = [];
   const created = [];
   for (const [i, link] of links.entries()) {
@@ -618,8 +654,10 @@ $('open-section').addEventListener('click', () => report('Open section', async (
   const groupId = await chrome.tabs.group({ tabIds, createProperties: { windowId } });
   await chrome.tabGroups.update(groupId, { title: name });
   toast(`Opened ${name}: ${created.length} new, ${moved.length} moved in`, async () => {
-    for (const id of created) await chrome.tabs.remove(id);
-    await chrome.tabs.ungroup(moved.map((tab) => tab.id));
+    // Tolerant of a new tab already closed by hand: that must not stop the moved ones going back.
+    for (const id of created) await chrome.tabs.remove(id).catch(() => {});
+    // Chrome rejects an empty list, which is what an all-new section has.
+    if (moved.length) await chrome.tabs.ungroup(moved.map((tab) => tab.id));
     await undoMoves(records);
     for (const tab of moved) if (tab.pinned) await chrome.tabs.update(tab.id, { pinned: true });
   });
