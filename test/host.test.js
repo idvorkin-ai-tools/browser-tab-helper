@@ -2,12 +2,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { encodeFrame, extensionIdForPath, frameReader, HOST_NAME, installHost, socketPath } from '../tools/host.js';
+import { defaultManifestDir, encodeFrame, extensionIdForPath, frameReader, HOST_NAME, installHost, socketPath } from '../tools/host.js';
 
 const HOST = fileURLToPath(new URL('../tools/host.js', import.meta.url));
 const ORIGIN = 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/';
@@ -237,4 +237,45 @@ test('a bad id is refused', () => {
   const result = spawnSync(process.execPath, [HOST, 'install', 'NOT-AN-ID', '--dir', join(tempDir(), 'hosts')], { encoding: 'utf8' });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /not an extension id/);
+});
+
+test('off macOS, the default paths fail clearly rather than pointing where Chrome will not look', () => {
+  assert.throws(() => defaultManifestDir('linux'), /macOS/);
+  assert.throws(() => socketPath({}, 'linux'), /macOS/);
+  assert.equal(socketPath({ BROWSER_TAB_HELPER_SOCK: '/tmp/x.sock' }, 'linux'), '/tmp/x.sock', 'an explicit path still works');
+  assert.match(defaultManifestDir('darwin'), /Google\/Chrome\/NativeMessagingHosts$/);
+});
+
+test('off macOS, install with no directory says so; with one it still works', () => {
+  // In a child with its own HOME: if this ever regresses, installHost writes to the default directory, which on a
+  // developer's Mac is their real Chrome profile. It did exactly that once, when this test ran in-process.
+  const home = tempDir();
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { homedir } from 'node:os';
+    import { installHost } from ${JSON.stringify(HOST)};
+    console.log(homedir());
+    try {
+      installHost({ extensionId: ${JSON.stringify('a'.repeat(32))}, platform: 'linux' });
+      console.log('WROTE');
+    } catch (error) {
+      console.log(error.message);
+    }`], { env: { ...process.env, HOME: home }, encoding: 'utf8' });
+  const [childHome, outcome] = child.stdout.trim().split('\n');
+  assert.equal(childHome, home, 'the child cannot reach the real home');
+  assert.match(outcome, /macOS/);
+  assert.ok(!existsSync(join(home, 'Library')), 'nothing written');
+  const dir = join(tempDir(), 'hosts');
+  assert.ok(installHost({ dir, extensionId: 'a'.repeat(32), platform: 'linux' }).manifestPath.startsWith(dir));
+});
+
+test('the tools run when started through a symlink, as an npm bin is, and not when imported', async () => {
+  const dir = tempDir();
+  const link = join(dir, 'host');
+  symlinkSync(HOST, link);
+  const result = spawnSync(process.execPath, [link], { encoding: 'utf8' });
+  assert.equal(result.status, 2, 'usage, which proves main ran');
+  assert.match(result.stderr, /usage/);
+  const imported = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(HOST)}); console.log('imported')`], { encoding: 'utf8' });
+  assert.equal(imported.status, 0);
+  assert.equal(imported.stdout.trim(), 'imported');
 });

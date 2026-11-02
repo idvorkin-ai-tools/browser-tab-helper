@@ -12,6 +12,7 @@ import net from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isEntryPoint, requireMacOS } from './entry.js';
 
 export const HOST_NAME = 'browser_tab_helper';
 const ANSWER_TIMEOUT_MS = 2000;
@@ -20,8 +21,10 @@ const MAX_REQUEST_BYTES = 64 * 1024;
 const SELF = fileURLToPath(import.meta.url);
 const CHECKOUT = dirname(dirname(SELF));
 
-export function socketPath(env = process.env) {
-  return env.BROWSER_TAB_HELPER_SOCK || join(homedir(), 'Library', 'Caches', 'browser-tab-helper', 'host.sock');
+export function socketPath(env = process.env, platform = process.platform) {
+  if (env.BROWSER_TAB_HELPER_SOCK) return env.BROWSER_TAB_HELPER_SOCK;
+  requireMacOS('The socket path', platform);
+  return join(homedir(), 'Library', 'Caches', 'browser-tab-helper', 'host.sock');
 }
 
 /** The id Chrome gives an unpacked extension: the path's SHA-256, first 16 bytes, hex digits mapped onto a to p. */
@@ -30,7 +33,8 @@ export function extensionIdForPath(path) {
   return [...hex].map((digit) => String.fromCharCode('a'.charCodeAt(0) + parseInt(digit, 16))).join('');
 }
 
-export function defaultManifestDir() {
+export function defaultManifestDir(platform = process.platform) {
+  requireMacOS("Chrome's host manifest directory", platform);
   return join(homedir(), 'Library', 'Application Support', 'Google', 'Chrome', 'NativeMessagingHosts');
 }
 
@@ -40,7 +44,7 @@ const shellQuote = (text) => `'${text.replaceAll("'", `'\\''`)}'`;
  * Writes the manifest and a launcher beside it. Chrome starts the host with a bare environment where
  * `#!/usr/bin/env node` often finds no node, so the launcher names the node running this install.
  */
-export function installHost({ dir = defaultManifestDir(), extensionId = extensionIdForPath(realpathSync(CHECKOUT)), nodePath = process.execPath } = {}) {
+export function installHost({ platform = process.platform, dir = defaultManifestDir(platform), extensionId = extensionIdForPath(realpathSync(CHECKOUT)), nodePath = process.execPath } = {}) {
   if (!/^[a-p]{32}$/.test(extensionId)) throw new Error(`not an extension id: ${extensionId}`);
   mkdirSync(dir, { recursive: true });
 
@@ -205,7 +209,7 @@ const USAGE = `usage: host install [extension id] [--dir <manifest dir>]
 With no id it allows the id Chrome gives an unpacked extension loaded from this checkout.
 Otherwise Chrome starts this script itself, passing the extension's origin.`;
 
-if (import.meta.main) {
+if (isEntryPoint(import.meta.url)) {
   const [command, ...rest] = process.argv.slice(2);
   if (command === 'install') {
     try {

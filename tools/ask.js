@@ -2,6 +2,7 @@
 // R8. Sends one command through the bridge and prints the answer.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { DEFAULT_PORT } from './bridge.js';
+import { isEntryPoint } from './entry.js';
 
 const USAGE = `usage: node tools/ask.js <command> [args] [--tab <id>] [--port <n>]
 
@@ -106,7 +107,7 @@ async function main() {
   console.log(JSON.stringify(answer.result, null, 2));
 }
 
-if (import.meta.main) {
+if (isEntryPoint(import.meta.url)) {
   main().catch((error) => {
     console.error(error.message);
     process.exit(1);
