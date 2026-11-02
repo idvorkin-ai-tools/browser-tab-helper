@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tabs</title>
+  <!-- The whole module graph, so imports are not discovered one level at a time. test/module-graph.test.js fails when this drifts. -->
+  <link rel="modulepreload" href="./list.js">
+  <link rel="modulepreload" href="../data/aliases.js">
+  <link rel="modulepreload" href="../data/kinds.js">
+  <link rel="modulepreload" href="../lib/duplicates.js">
+  <link rel="modulepreload" href="../lib/kinds.js">
+  <link rel="modulepreload" href="../lib/layouts.js">
+  <link rel="modulepreload" href="../lib/normalize.js">
+  <link rel="modulepreload" href="../lib/sections.js">
+  <link rel="modulepreload" href="../lib/settings.js">
+  <link rel="modulepreload" href="../lib/titles.js">
+  <link rel="modulepreload" href="../lib/undo.js">
+  <link rel="modulepreload" href="../lib/view.js">
+  <link rel="modulepreload" href="../lib/window-names.js">
+  <link rel="stylesheet" href="./list.css">
+  <script type="module" src="./list.js"></script>
+</head>
+<body>
+  <header>
+    <div class="top-row">
+      <h1>Tabs <span id="total" class="muted"></span></h1>
+      <div class="buttons">
+        <button id="refresh" title="Re-reads the tabs. Does not reload the extension.">⟳ Refresh</button>
+        <button id="save-layout">Save layout</button>
+        <button id="restore-layout">Restore layout…</button>
+        <button id="open-section" title="Opens the links on the clipboard as a group at the end of this window">Open section</button>
+        <input id="layout-file" type="file" accept="application/json,.json" hidden>
+      </div>
+    </div>
+    <div class="ask-row">
+      <label class="switch"><input id="ask-enabled" type="checkbox"> Ask when I open a duplicate</label>
+      <div id="muted"></div>
+    </div>
+    <div id="strip" class="chips" aria-label="Windows"></div>
+    <div id="kinds" class="chips" aria-label="Kinds"></div>
+    <div class="view-row">
+      <div id="lenses" class="lenses" role="tablist">
+        <button data-lens="window" role="tab">By window</button>
+        <button data-lens="kind" role="tab">By kind</button>
+        <button data-lens="group" role="tab">By tab group</button>
+        <button data-lens="duplicates" role="tab">Duplicates</button>
+      </div>
+      <input id="filter" type="search" placeholder="Filter  /" aria-label="Filter tabs">
+    </div>
+    <div id="selection-bar" class="selection-bar" hidden></div>
+  </header>
+
+  <main id="sections"></main>
+
+  <footer>
+    <label class="switch"><input id="auto-reload" type="checkbox"> Reload the extension when its files change</label>
+    <label class="switch" title="While the bridge server runs, any local process can drive this browser. Stop it when you are done.">
+      <input id="bridge-enabled" type="checkbox"> Bridge for local tools
+    </label>
+    <span id="load-time" class="muted"></span>
+  </footer>
+
+  <div id="tray" class="tray chips" hidden></div>
+  <div id="drop-line" class="drop-line" hidden></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+</body>
+</html>
